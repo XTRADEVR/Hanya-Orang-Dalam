@@ -1,7 +1,3 @@
-"""
-Web Terminal v2 FIXED FINAL
-"""
-
 import codecs
 import hmac
 import json
@@ -18,7 +14,7 @@ from html import escape
 from pathlib import Path
 import streamlit as st
 
-st.set_page_config(page_title="Web Terminal", page_icon="💻", layout="wide")
+st.set_page_config(page_title="Web Terminal v2 FULL", page_icon="💻", layout="wide")
 BASE_DIR = Path(__file__).resolve().parent
 SANDBOX = BASE_DIR / "sandbox"
 SANDBOX.mkdir(exist_ok=True)
@@ -41,8 +37,14 @@ FORK_BOMB_RE = re.compile(r":\s*\(\s*\)\s*\{")
 PKG_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 SAFE_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "HOME": str(SANDBOX)}
 PY_ENV = dict(SAFE_ENV, PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1")
-INTERACT_CODE = "import code,sys\nprint('Python '+sys.version.split()[0]+' interaktif.', flush=True)\ncode.interact(banner='', exitmsg='')"
-HELP_TEXT = """help | clear | history | pwd | cd | ls | cat | mkdir | touch | rm | edit | python"""
+INTERACT_CODE = "import code,sys\nprint('Python '+sys.version.split()[0]+' interaktif. Ketik exit() untuk keluar.', flush=True)\ncode.interact(banner='', exitmsg='')"
+HELP_TEXT = '''Perintah:
+  help | clear | history
+  pwd | cd | ls | cat | head | tail | wc | mkdir | touch | rm | edit | echo
+  whoami | date | uname | df | free | uptime
+  pip list | freeze | --version | show <paket>
+  python --version | python <skrip> | python -c "kode"
+'''
 
 def get_setting(name, default=""):
     try:
@@ -77,7 +79,9 @@ def validate_path_args(args):
     cwd = current_dir()
     for a in args:
         if a.startswith("-"):
-            return f"opsi tidak diizinkan: {a}"
+            if "/" in a or ".." in a or "=" in a:
+                return f"opsi tidak diizinkan: {a}"
+            continue
         if not inside_sandbox(cwd / a):
             return f"akses ditolak: {a}"
     return None
@@ -88,13 +92,26 @@ def nl(text):
 def add_seg(entry, tag, text):
     if not text:
         return
-    entry["segs"].append([tag, text])
+    size = entry.get("size", 0)
+    if size >= MAX_ENTRY_CHARS:
+        return
+    size += len(text)
+    entry["size"] = size
+    if size > MAX_ENTRY_CHARS:
+        over = size - MAX_ENTRY_CHARS
+        text = text[: len(text) - over] + "\n[... output dipotong ...]\n"
+    segs = entry["segs"]
+    if segs and segs[-1][0] == tag:
+        segs[-1][1] += text
+    else:
+        segs.append([tag, text])
 
 def _limits():
     try:
         import resource
         resource.setrlimit(resource.RLIMIT_CPU, (MAX_RUNTIME, MAX_RUNTIME))
         resource.setrlimit(resource.RLIMIT_AS, (MEM_LIMIT, MEM_LIMIT))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_LIMIT, FSIZE_LIMIT))
     except Exception:
         pass
 
@@ -118,19 +135,25 @@ class Proc:
         self.entry = entry
         self.label = label
         self.q = queue.Queue()
+        self.started = time.time()
         self.killed_reason = None
-        self.threads = [threading.Thread(target=_reader, args=(popen.stdout, "out", self.q), daemon=True), threading.Thread(target=_reader, args=(popen.stderr, "err", self.q), daemon=True)]
+        self.threads = [
+            threading.Thread(target=_reader, args=(popen.stdout, "out", self.q), daemon=True),
+            threading.Thread(target=_reader, args=(popen.stderr, "err", self.q), daemon=True),
+        ]
         for t in self.threads:
             t.start()
-        self.timer = threading.Timer(MAX_RUNTIME, self.kill, args=(f"timeout {MAX_RUNTIME}",))
+        self.timer = threading.Timer(MAX_RUNTIME, self.kill, args=(f"melewati batas waktu {MAX_RUNTIME} detik",))
         self.timer.daemon = True
         self.timer.start()
     def kill(self, reason):
         if self.popen.poll() is None:
             self.killed_reason = reason
             try:
-                import os as _os, signal as _sig
-                _os.killpg(_os.getpgid(self.popen.pid), _sig.SIGKILL)
+                if os.name == "posix":
+                    os.killpg(os.getpgid(self.popen.pid), signal.SIGKILL)
+                else:
+                    self.popen.kill()
             except Exception:
                 pass
     def threads_done(self):
@@ -144,7 +167,7 @@ def start_process(argv, label, entry):
     try:
         popen = subprocess.Popen(argv, cwd=str(current_dir()), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=PY_ENV, bufsize=0, shell=False, **kwargs)
     except Exception as e:
-        add_seg(entry, "err", f"gagal: {e}\n")
+        add_seg(entry, "err", f"gagal memulai proses: {e}\n")
         return
     st.session_state.proc = Proc(popen, entry, label)
 
@@ -163,6 +186,18 @@ def drain():
     if proc.popen.poll() is not None and proc.threads_done():
         pull()
         proc.timer.cancel()
+        code = proc.popen.returncode
+        entry = proc.entry
+        if entry["segs"] and not entry["segs"][-1][1].endswith("\n"):
+            add_seg(entry, "out", "\n")
+        if proc.killed_reason:
+            add_seg(entry, "err", f"[dihentikan: {proc.killed_reason}]\n")
+        elif code not in (0, None):
+            add_seg(entry, "err", f"[proses berakhir dengan kode {code}]\n")
+        try:
+            proc.popen.stdin.close()
+        except Exception:
+            pass
         st.session_state.proc = None
         save_history()
         return "done"
@@ -180,10 +215,12 @@ def send_line(line):
 def run_short(argv, entry):
     try:
         r = subprocess.run(argv, cwd=str(current_dir()), capture_output=True, timeout=TIMEOUT_SECONDS, env=SAFE_ENV, shell=False)
-        add_seg(entry, "out", r.stdout.decode("utf-8", "replace"))
-        add_seg(entry, "err", r.stderr.decode("utf-8", "replace"))
+        so = r.stdout.decode("utf-8", "replace")
+        se = r.stderr.decode("utf-8", "replace")
+        add_seg(entry, "out", nl(so))
+        add_seg(entry, "err", nl(se))
     except Exception as e:
-        add_seg(entry, "err", str(e))
+        add_seg(entry, "err", f"[error] {e}\n")
 
 def out(entry, text):
     add_seg(entry, "out", nl(text))
@@ -195,66 +232,155 @@ def execute(line, entry):
     line = line.strip()
     if not line:
         return False
+    if "\n" in line or "\r" in line:
+        err(entry, "diblokir: baris baru tidak diizinkan")
+        return True
     try:
         tokens = shlex.split(line)
-    except Exception as e:
-        err(entry, str(e))
+    except ValueError as e:
+        err(entry, f"sintaks salah: {e}")
         return True
+    if not tokens:
+        return False
     cmd, args = tokens[0], tokens[1:]
+    is_py = cmd in ("python", "python3")
+    if not is_py:
+        if FORK_BOMB_RE.search(line):
+            err(entry, "diblokir: fork bomb")
+            return True
+        if any(ch in FORBIDDEN_CHARS for ch in line):
+            err(entry, "diblokir: karakter ; & | < > ` $ tidak diizinkan")
+            return True
+    if cmd in BLOCKED_WORDS:
+        err(entry, f"diblokir: {cmd}")
+        return True
+    cwd = current_dir()
     if cmd == "help":
         out(entry, HELP_TEXT)
     elif cmd == "clear":
         st.session_state.history = []
         return False
+    elif cmd == "history":
+        out(entry, "\n".join(f"{i+1:>4}  {h['cmd']}" for i, h in enumerate(st.session_state.history)))
     elif cmd == "pwd":
         out(entry, rel_cwd())
     elif cmd == "cd":
+        if len(args) > 1:
+            err(entry, "cd: terlalu banyak argumen")
+            return True
         target = args[0] if args else "~"
-        new = SANDBOX if target == "~" else (current_dir() / target).resolve()
-        if not inside_sandbox(new):
-            err(entry, "akses ditolak")
-        elif not new.is_dir():
-            err(entry, "bukan folder")
+        if target == "-":
+            new = (SANDBOX / st.session_state.prev_cwd).resolve()
+        elif target in ("~", ""):
+            new = SANDBOX
         else:
+            new = (cwd / target).resolve()
+        if not inside_sandbox(new):
+            err(entry, "cd: akses ditolak")
+        elif not new.is_dir():
+            err(entry, f"cd: {target}: bukan folder")
+        else:
+            st.session_state.prev_cwd = st.session_state.cwd
             st.session_state.cwd = str(new.relative_to(SANDBOX))
+    elif cmd == "mkdir":
+        parents = "-p" in args
+        names = [a for a in args if a != "-p"]
+        for n in names:
+            p = cwd / n
+            if not inside_sandbox(p):
+                err(entry, f"akses ditolak: {n}")
+                continue
+            try:
+                p.mkdir(parents=parents, exist_ok=parents)
+            except Exception as e:
+                err(entry, f"mkdir: {n}: {e}")
+    elif cmd == "touch":
+        for n in args:
+            p = cwd / n
+            if not inside_sandbox(p):
+                err(entry, f"tidak diizinkan: {n}")
+                continue
+            try:
+                p.touch()
+            except Exception as e:
+                err(entry, f"touch: {n}: {e}")
+    elif cmd == "rm":
+        for n in args:
+            p = cwd / n
+            if not p.is_file():
+                err(entry, f"rm: {n}: bukan file")
+            else:
+                try:
+                    p.unlink()
+                except Exception as e:
+                    err(entry, f"rm: {n}: {e}")
+    elif cmd == "edit":
+        p = cwd / args[0]
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        st.session_state.editing = str(p.relative_to(SANDBOX))
+        st.session_state.edit_initial = text
+        st.session_state.edit_nonce += 1
+        out(entry, f"editor dibuka untuk {args[0]}")
+    elif is_py:
+        if args in (["--version"], ["-V"]):
+            run_short([sys.executable, "--version"], entry)
+        elif not ALLOW_PYTHON:
+            err(entry, "python: dinonaktifkan")
+        elif not args:
+            start_process([sys.executable, "-u", "-c", INTERACT_CODE], "python", entry)
+        elif args[0] == "-c":
+            start_process([sys.executable, "-u", "-c", args[1]] + args[2:], "python -c", entry)
+        else:
+            script = (cwd / args[0]).resolve()
+            start_process([sys.executable, "-u", str(script)] + args[1:], f"python {args[0]}", entry)
+    elif cmd == "pip":
+        pip = [sys.executable, "-m", "pip", "--disable-pip-version-check"]
+        run_short(pip + args, entry)
     elif cmd in PATH_COMMANDS or cmd in PLAIN_COMMANDS:
         run_short([cmd] + args, entry)
-    elif cmd == "python":
-        run_short([sys.executable, "--version"], entry)
     else:
-        err(entry, f"{cmd}: tidak diizinkan")
+        err(entry, f"{cmd}: tidak ditemukan")
     return True
 
 def load_history():
     if PERSIST_HISTORY and HISTORY_FILE.exists():
         try:
-            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            return data[-MAX_HISTORY:]
         except Exception:
             pass
     return []
 
 def save_history():
     try:
-        HISTORY_FILE.write_text(json.dumps(st.session_state.history[-200:], ensure_ascii=False), encoding="utf-8")
+        HISTORY_FILE.write_text(json.dumps(st.session_state.history[-MAX_HISTORY:], ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
-for k, v in {"history": None, "cwd": ".", "prev_cwd": ".", "proc": None, "authed": False, "editing": None, "edit_initial": "", "edit_nonce": 0, "up_nonce": 0, "flash": ""}.items():
+defaults = {"history": None, "cwd": ".", "prev_cwd": ".", "proc": None, "authed": False, "editing": None, "edit_initial": "", "edit_nonce": 0, "up_nonce": 0, "flash": ""}
+for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 if st.session_state.history is None:
     st.session_state.history = load_history()
 
-# CSS TANPA TRIPLE QUOTE - AMAN
-css_code = "<style>\n"
+# CSS FINAL TANPA 1.5rem
+css_code = ""
+css_code += "<style>\n"
 css_code += ".stApp { background: #000; }\n"
 css_code += ".block-container { max-width: 1100px; padding-top: 24px; }\n"
 css_code += ".term-box { background: #000; border: 1px solid #1f6f1f; border-radius: 8px; height: 62vh; overflow-y: auto; display: flex; flex-direction: column-reverse; padding: 12px; }\n"
 css_code += ".term-inner { font-family: monospace; font-size: 14px; color: #39ff14; }\n"
+css_code += ".term-inner .prompt { color: #7dffb0; font-weight: 600; }\n"
+css_code += ".term-inner .cmd { color: #ffffff; }\n"
+css_code += ".term-inner .out { color: #e8ffe8; }\n"
+css_code += ".term-inner .err { color: #ff4d4d; }\n"
+css_code += ".term-inner .stdin { color: #6ee7ff; }\n"
+css_code += ".term-inner .muted { color: #5fae5f; }\n"
 css_code += "</style>"
 
 st.markdown(css_code, unsafe_allow_html=True)
-st.markdown("### Web Terminal v2 - FIXED FINAL")
+st.markdown("### Web Terminal v2 - FULL FIXED")
 
 if PASSWORD and not st.session_state.authed:
     with st.form("login"):
@@ -268,9 +394,10 @@ if PASSWORD and not st.session_state.authed:
     st.stop()
 
 def terminal_html():
-    parts = ['<span>Terminal siap</span>\n']
+    proc = st.session_state.proc
+    parts = ['<span class="muted">Web Terminal siap. Ketik help</span>\n']
     for h in st.session_state.history:
-        parts.append(f'<span>{escape(h["cwd"])}$ {escape(h["cmd"])}</span>\n')
+        parts.append(f'<span class="prompt">{escape(h["cwd"])}$</span> <span class="cmd">{escape(h["cmd"])}</span>\n')
         for tag, text in h["segs"]:
             parts.append(f'<span>{escape(text)}</span>')
     return "".join(parts)
@@ -295,5 +422,29 @@ if submitted and text.strip():
         entry = {"cwd": rel_cwd(), "cmd": text.strip(), "segs": [], "size": 0}
         if execute(text, entry):
             st.session_state.history.append(entry)
+            st.session_state.history = st.session_state.history[-MAX_HISTORY:]
         save_history()
+        st.rerun()
+
+if st.session_state.editing:
+    rel = st.session_state.editing
+    with st.container(border=True):
+        st.markdown(f"**Editor:** `{rel}`")
+        content = st.text_area("isi file", value=st.session_state.edit_initial, height=300, key=f"editor_{st.session_state.edit_nonce}", label_visibility="collapsed")
+        b1, b2, _ = st.columns([1, 1, 5])
+        if b1.button("Simpan"):
+            target = SANDBOX / rel
+            target.write_text(content, encoding="utf-8")
+            st.session_state.flash = f"{rel} tersimpan"
+            st.rerun()
+        if b2.button("Tutup"):
+            st.session_state.editing = None
+            st.rerun()
+
+with st.expander("Upload file"):
+    ups = st.file_uploader("Pilih file", accept_multiple_files=True, key=f"uploader_{st.session_state.up_nonce}")
+    if ups:
+        for f in ups:
+            target = current_dir() / Path(f.name).name
+            target.write_bytes(f.getvalue())
         st.rerun()
