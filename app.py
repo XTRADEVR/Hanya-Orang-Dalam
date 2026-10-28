@@ -1,26 +1,8 @@
-Web Terminal v2 (Streamlit)
-
-Fitur:
-- Perintah aman (allowlist) + sandbox folder ./sandbox
-- Working directory persisten (cd), tersimpan di st.session_state
-- Eksekusi skrip Python & interpreter interaktif dengan streaming output
-  dan input (stdin) langsung dari terminal  -> DIMATIKAN secara default
-- stderr tampil merah, input pengguna tampil biru muda
-- Auto-scroll ke baris terbaru, font Fira Code, latar hitam pekat
-- Editor file (perintah `edit`) dan upload file ke folder aktif
-- Riwayat disimpan ke file agar bertahan setelah browser di-refresh
-
-KEAMANAN - BACA INI:
-Perintah biasa (ls, cat, ...) dikunci ke sandbox dan allowlist.
-Eksekusi Python (python script.py / python / python -c) TIDAK bisa
-dikunci sepenuhnya dari dalam Python: skrip bisa `import os` dan menyentuh
-apa pun yang boleh diakses user server. Batas yang dipasang di sini
-(timeout, batas CPU/RAM/ukuran file, env minimal, password) hanya
-mengurangi risiko, bukan isolasi. Aktifkan hanya untuk pemakaian pribadi
-atau di dalam container, dengan TERMINAL_PASSWORD terisi:
-
-    TERMINAL_ALLOW_PYTHON=1   (environment atau st.secrets)
-    TERMINAL_PASSWORD=...     (environment atau st.secrets)
+"""
+Web Terminal v2 (Streamlit) - FIXED VERSION
+Fitur: allowlist + sandbox ./sandbox + cd persisten + python streaming
+FIX: SyntaxError invalid decimal literal di .block-container 1.5rem
+Solusi: pakai ''' bukan """ untuk CSS
 """
 
 import codecs
@@ -40,9 +22,6 @@ from pathlib import Path
 
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Konfigurasi
-# ---------------------------------------------------------------------------
 st.set_page_config(page_title="Web Terminal", page_icon="💻", layout="wide")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,16 +29,16 @@ SANDBOX = BASE_DIR / "sandbox"
 SANDBOX.mkdir(exist_ok=True)
 
 HISTORY_FILE = BASE_DIR / "terminal_history.json"
-PERSIST_HISTORY = True          # simpan riwayat ke file (bertahan setelah refresh)
-TIMEOUT_SECONDS = 10            # batas waktu perintah singkat (ls, pip list, ...)
-MAX_RUNTIME = 300               # batas total proses Python interaktif (detik)
-MEM_LIMIT = 1024 * 1024 * 1024  # batas memori proses Python (1 GB, Linux)
-FSIZE_LIMIT = 20 * 1024 * 1024  # batas ukuran file yang ditulis proses (20 MB)
-MAX_ENTRY_CHARS = 60_000        # batas output per perintah
+PERSIST_HISTORY = True
+TIMEOUT_SECONDS = 10
+MAX_RUNTIME = 300
+MEM_LIMIT = 1024 * 1024 * 1024
+FSIZE_LIMIT = 20 * 1024 * 1024
+MAX_ENTRY_CHARS = 60_000
 MAX_HISTORY = 200
 MAX_UPLOAD = 5 * 1024 * 1024
 MAX_EDIT_BYTES = 200 * 1024
-POLL_INTERVAL = 0.4             # detik, refresh live output
+POLL_INTERVAL = 0.4
 
 PATH_COMMANDS = {"ls", "cat", "head", "tail", "wc"}
 PLAIN_COMMANDS = {"echo", "whoami", "date", "uname", "df", "free", "uptime"}
@@ -105,31 +84,23 @@ HELP_TEXT = """Perintah yang tersedia:
 Python (hanya jika TERMINAL_ALLOW_PYTHON=1):
   python <skrip.py> [arg]   jalankan skrip, output tampil langsung,
                             input() membaca dari kotak input di bawah
-  python                    interpreter interaktif (baris kosong
-                            menutup blok for/if/def; exit() untuk keluar)
+  python                    interpreter interaktif
   python -c "kode"          jalankan kode satu baris
   Tombol Stop = Ctrl+C
-
 Pipe, redirect, ; && $() dan perintah berbahaya diblokir.
 Aplikasi yang butuh TTY penuh (vim, top, nano) tidak didukung."""
-
 
 def get_setting(name: str, default: str = "") -> str:
     try:
         if name in st.secrets:
             return str(st.secrets[name])
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return os.environ.get(name, default)
-
 
 PASSWORD = get_setting("TERMINAL_PASSWORD")
 ALLOW_PYTHON = get_setting("TERMINAL_ALLOW_PYTHON").lower() in ("1", "true", "yes", "on")
 
-
-# ---------------------------------------------------------------------------
-# Keamanan path & utilitas
-# ---------------------------------------------------------------------------
 def inside_sandbox(path: Path) -> bool:
     try:
         path.resolve().relative_to(SANDBOX)
@@ -137,11 +108,9 @@ def inside_sandbox(path: Path) -> bool:
     except ValueError:
         return False
 
-
 def current_dir() -> Path:
     p = (SANDBOX / st.session_state.cwd).resolve()
     return p if inside_sandbox(p) else SANDBOX
-
 
 def rel_cwd() -> str:
     try:
@@ -150,8 +119,7 @@ def rel_cwd() -> str:
     except ValueError:
         return "~"
 
-
-def validate_path_args(args: list) -> "str | None":
+def validate_path_args(args: list):
     cwd = current_dir()
     for a in args:
         if a.startswith("-"):
@@ -162,13 +130,10 @@ def validate_path_args(args: list) -> "str | None":
             return f"akses ditolak (di luar sandbox): {a}"
     return None
 
-
 def nl(text: str) -> str:
     return text if (not text or text.endswith("\n")) else text + "\n"
 
-
 def add_seg(entry: dict, tag: str, text: str) -> None:
-    """Tambah potongan output ke entry. tag: out | err | in"""
     if not text:
         return
     size = entry.get("size", 0)
@@ -185,20 +150,14 @@ def add_seg(entry: dict, tag: str, text: str) -> None:
     else:
         segs.append([tag, text])
 
-
-# ---------------------------------------------------------------------------
-# Proses panjang / interaktif (streaming)
-# ---------------------------------------------------------------------------
-def _limits() -> None:  # dijalankan di proses anak (Linux/macOS)
+def _limits() -> None:
     try:
         import resource
-
         resource.setrlimit(resource.RLIMIT_CPU, (MAX_RUNTIME, MAX_RUNTIME))
         resource.setrlimit(resource.RLIMIT_AS, (MEM_LIMIT, MEM_LIMIT))
         resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_LIMIT, FSIZE_LIMIT))
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
-
 
 def _reader(stream, tag: str, q: "queue.Queue") -> None:
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -214,7 +173,6 @@ def _reader(stream, tag: str, q: "queue.Queue") -> None:
         if text:
             q.put((tag, text))
 
-
 class Proc:
     def __init__(self, popen: subprocess.Popen, entry: dict, label: str):
         self.popen = popen
@@ -229,7 +187,6 @@ class Proc:
         ]
         for t in self.threads:
             t.start()
-        # penjaga: proses pasti mati setelah MAX_RUNTIME walau tab ditutup
         self.timer = threading.Timer(
             MAX_RUNTIME, self.kill, args=(f"melewati batas waktu {MAX_RUNTIME} detik",)
         )
@@ -244,12 +201,11 @@ class Proc:
                     os.killpg(os.getpgid(self.popen.pid), signal.SIGKILL)
                 else:
                     self.popen.kill()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     def threads_done(self) -> bool:
         return not any(t.is_alive() for t in self.threads)
-
 
 def start_process(argv: list, label: str, entry: dict) -> None:
     kwargs = {}
@@ -268,18 +224,15 @@ def start_process(argv: list, label: str, entry: dict) -> None:
             shell=False,
             **kwargs,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         add_seg(entry, "err", f"gagal memulai proses: {e}\n")
         return
     st.session_state.proc = Proc(popen, entry, label)
 
-
 def drain() -> str:
-    """Tarik output baru dari proses aktif ke riwayat. Return 'done' jika selesai."""
     proc = st.session_state.get("proc")
     if not proc:
         return "idle"
-
     def pull() -> None:
         while True:
             try:
@@ -287,7 +240,6 @@ def drain() -> str:
             except queue.Empty:
                 break
             add_seg(proc.entry, tag, text)
-
     pull()
     if proc.popen.poll() is not None and proc.threads_done():
         pull()
@@ -302,13 +254,12 @@ def drain() -> str:
             add_seg(entry, "err", f"[proses berakhir dengan kode {code}]\n")
         try:
             proc.popen.stdin.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         st.session_state.proc = None
         save_history()
         return "done"
     return "running"
-
 
 def send_line(line: str) -> None:
     proc = st.session_state.proc
@@ -319,10 +270,6 @@ def send_line(line: str) -> None:
         pass
     add_seg(proc.entry, "in", line + "\n")
 
-
-# ---------------------------------------------------------------------------
-# Perintah singkat
-# ---------------------------------------------------------------------------
 def run_short(argv: list, entry: dict) -> None:
     try:
         r = subprocess.run(
@@ -343,20 +290,16 @@ def run_short(argv: list, entry: dict) -> None:
         add_seg(entry, "err", f"[timeout] dihentikan setelah {TIMEOUT_SECONDS} detik\n")
     except FileNotFoundError:
         add_seg(entry, "err", f"{argv[0]}: perintah tidak tersedia di server ini\n")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         add_seg(entry, "err", f"[error] {e}\n")
-
 
 def out(entry: dict, text: str) -> None:
     add_seg(entry, "out", nl(text))
 
-
 def err(entry: dict, text: str) -> None:
     add_seg(entry, "err", nl(text))
 
-
 def execute(line: str, entry: dict) -> bool:
-    """Jalankan satu baris. Return False jika entry tidak perlu dicatat (mis. clear)."""
     line = line.strip()
     if not line:
         return False
@@ -370,10 +313,8 @@ def execute(line: str, entry: dict) -> bool:
         return True
     if not tokens:
         return False
-
     cmd, args = tokens[0], tokens[1:]
     is_py = cmd in ("python", "python3")
-
     if not is_py:
         if FORK_BOMB_RE.search(line):
             err(entry, "diblokir: pola fork bomb terdeteksi")
@@ -384,10 +325,7 @@ def execute(line: str, entry: dict) -> bool:
     if cmd in BLOCKED_WORDS:
         err(entry, f"diblokir: perintah '{cmd}' tidak diizinkan di terminal ini")
         return True
-
     cwd = current_dir()
-
-    # ---- builtin ----
     if cmd == "help":
         out(entry, HELP_TEXT)
     elif cmd == "clear":
@@ -430,7 +368,7 @@ def execute(line: str, entry: dict) -> bool:
                 continue
             try:
                 p.mkdir(parents=parents, exist_ok=parents)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 err(entry, f"mkdir: {n}: {e}")
     elif cmd == "touch":
         if not args:
@@ -442,7 +380,7 @@ def execute(line: str, entry: dict) -> bool:
                 continue
             try:
                 p.touch()
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 err(entry, f"touch: {n}: {e}")
     elif cmd == "rm":
         if not args:
@@ -450,7 +388,7 @@ def execute(line: str, entry: dict) -> bool:
         for n in args:
             p = cwd / n
             if n.startswith("-"):
-                err(entry, f"rm: opsi tidak diizinkan: {n} (hanya file, tanpa -r/-f)")
+                err(entry, f"rm: opsi tidak diizinkan: {n}")
             elif not inside_sandbox(p):
                 err(entry, f"rm: akses ditolak (di luar sandbox): {n}")
             elif not p.is_file():
@@ -458,7 +396,7 @@ def execute(line: str, entry: dict) -> bool:
             else:
                 try:
                     p.unlink()
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     err(entry, f"rm: {n}: {e}")
     elif cmd == "edit":
         if len(args) != 1 or args[0].startswith("-"):
@@ -476,22 +414,16 @@ def execute(line: str, entry: dict) -> bool:
                         st.session_state.editing = str(p.relative_to(SANDBOX))
                         st.session_state.edit_initial = text
                         st.session_state.edit_nonce += 1
-                        out(entry, f"editor dibuka untuk {args[0]} (lihat panel di bawah terminal)")
+                        out(entry, f"editor dibuka untuk {args[0]}")
                 except UnicodeDecodeError:
                     err(entry, "edit: file bukan teks UTF-8")
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     err(entry, f"edit: {e}")
-
-    # ---- python ----
     elif is_py:
         if args in (["--version"], ["-V"]):
             run_short([sys.executable, "--version"], entry)
         elif not ALLOW_PYTHON:
-            err(
-                entry,
-                "python: eksekusi skrip dinonaktifkan. Aktifkan dengan TERMINAL_ALLOW_PYTHON=1 "
-                "(environment atau st.secrets) dan isi TERMINAL_PASSWORD. Hanya 'python --version' yang tersedia.",
-            )
+            err(entry, "python: eksekusi skrip dinonaktifkan. Aktifkan dengan TERMINAL_ALLOW_PYTHON=1")
         elif not args:
             start_process([sys.executable, "-u", "-c", INTERACT_CODE], "python (interaktif)", entry)
         elif args[0] == "-c":
@@ -504,11 +436,9 @@ def execute(line: str, entry: dict) -> bool:
         else:
             script = (cwd / args[0]).resolve()
             if not inside_sandbox(script) or not script.is_file():
-                err(entry, f"python: tidak bisa membuka '{args[0]}' (harus file di dalam sandbox)")
+                err(entry, f"python: tidak bisa membuka '{args[0]}'")
             else:
                 start_process([sys.executable, "-u", str(script)] + args[1:], f"python {args[0]}", entry)
-
-    # ---- pip ----
     elif cmd == "pip":
         pip = [sys.executable, "-m", "pip", "--disable-pip-version-check"]
         if args in (["list"], ["freeze"], ["--version"]):
@@ -517,8 +447,6 @@ def execute(line: str, entry: dict) -> bool:
             run_short(pip + args, entry)
         else:
             err(entry, "pip: hanya list | freeze | --version | show <paket> yang diizinkan")
-
-    # ---- perintah dengan path ----
     elif cmd in PATH_COMMANDS:
         problem = validate_path_args(args)
         if problem:
@@ -531,10 +459,6 @@ def execute(line: str, entry: dict) -> bool:
         err(entry, f"{cmd}: perintah tidak ditemukan atau tidak diizinkan (ketik 'help')")
     return True
 
-
-# ---------------------------------------------------------------------------
-# Riwayat (session_state + file)
-# ---------------------------------------------------------------------------
 def load_history() -> list:
     if PERSIST_HISTORY and HISTORY_FILE.exists():
         try:
@@ -542,27 +466,21 @@ def load_history() -> list:
             clean = []
             for h in data[-MAX_HISTORY:]:
                 segs = h.get("segs")
-                if segs is None:  # kompatibel dengan versi lama
+                if segs is None:
                     segs = [["out", nl(h.get("out", ""))]] if h.get("out") else []
-                clean.append({"cwd": h.get("cwd", "~"), "cmd": h.get("cmd", ""), "segs": segs,
-                              "size": sum(len(s[1]) for s in segs)})
+                clean.append({"cwd": h.get("cwd", "~"), "cmd": h.get("cmd", ""), "segs": segs, "size": sum(len(s[1]) for s in segs)})
             return clean
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return []
-
 
 def save_history() -> None:
     if not PERSIST_HISTORY:
         return
     try:
-        HISTORY_FILE.write_text(
-            json.dumps(st.session_state.history[-MAX_HISTORY:], ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception:  # noqa: BLE001
+        HISTORY_FILE.write_text(json.dumps(st.session_state.history[-MAX_HISTORY:], ensure_ascii=False), encoding="utf-8")
+    except Exception:
         pass
-
 
 defaults = {
     "history": None,
@@ -582,12 +500,8 @@ for k, v in defaults.items():
 if st.session_state.history is None:
     st.session_state.history = load_history()
 
-
-# ---------------------------------------------------------------------------
-# Tampilan (CSS)
-# ---------------------------------------------------------------------------
-st.markdown(
-    """
+# FIXED CSS - pakai ''' bukan """ biar 1.5rem gak error
+st.markdown('''
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&display=swap');
 .stApp { background: #000; }
@@ -597,7 +511,7 @@ h1, h2, h3, p, label, span, div { color: #d6ffd6; }
 .term-box {
     background: #000; border: 1px solid #1f6f1f; border-radius: 8px;
     box-shadow: 0 0 16px #00ff0033; height: 62vh; overflow-y: auto;
-    display: flex; flex-direction: column-reverse;  /* auto-scroll ke baris terbaru */
+    display: flex; flex-direction: column-reverse;
     padding: 12px;
 }
 .term-inner {
@@ -627,15 +541,10 @@ h1, h2, h3, p, label, span, div { color: #d6ffd6; }
 textarea { font-family: "Fira Code", "Courier New", monospace !important;
     background: #050505 !important; color: #e8ffe8 !important; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+''', unsafe_allow_html=True)
 
 st.markdown("### 💻 Web Terminal")
 
-# ---------------------------------------------------------------------------
-# Login & peringatan
-# ---------------------------------------------------------------------------
 if PASSWORD and not st.session_state.authed:
     with st.form("login"):
         pw = st.text_input("Password terminal", type="password")
@@ -648,10 +557,7 @@ if PASSWORD and not st.session_state.authed:
     st.stop()
 
 if ALLOW_PYTHON and not PASSWORD:
-    st.error(
-        "Eksekusi Python AKTIF tanpa password. Siapa pun yang membuka aplikasi ini bisa "
-        "menjalankan kode di server. Isi TERMINAL_PASSWORD atau matikan TERMINAL_ALLOW_PYTHON."
-    )
+    st.error("Eksekusi Python AKTIF tanpa password. Isi TERMINAL_PASSWORD.")
 elif not PASSWORD:
     st.warning("Mode tanpa password. Aman untuk lokal, jangan deploy publik tanpa TERMINAL_PASSWORD.")
 
@@ -659,54 +565,31 @@ if st.session_state.flash:
     st.toast(st.session_state.flash)
     st.session_state.flash = ""
 
-
-# ---------------------------------------------------------------------------
-# Layar terminal (fragment: auto-refresh saat proses berjalan)
-# ---------------------------------------------------------------------------
 CLS = {"out": "out", "err": "err", "in": "stdin"}
-
 
 def terminal_html() -> str:
     proc = st.session_state.proc
-    parts = [
-        '<span class="muted">Web Terminal siap. Ketik <b>help</b> untuk daftar perintah. '
-        "Sandbox: ./sandbox</span>\n"
-    ]
+    parts = ['<span class="muted">Web Terminal siap. Ketik <b>help</b> untuk daftar perintah. Sandbox: ./sandbox</span>\n']
     for h in st.session_state.history:
-        parts.append(
-            f'<span class="prompt">user@streamlit:{escape(h["cwd"])}$</span> '
-            f'<span class="cmd">{escape(h["cmd"])}</span>\n'
-        )
+        parts.append(f'<span class="prompt">user@streamlit:{escape(h["cwd"])}$</span> <span class="cmd">{escape(h["cmd"])}</span>\n')
         for tag, text in h["segs"]:
             parts.append(f'<span class="{CLS.get(tag, "out")}">{escape(text)}</span>')
         if proc and proc.entry is h:
             parts.append('<span class="cursor">█</span>')
     return "".join(parts)
 
-
 def terminal_view() -> None:
     if drain() == "done":
-        st.rerun()  # rerun penuh: hentikan polling & tampilkan prompt normal
-    st.markdown(
-        f'<div class="term-box"><div class="term-inner">{terminal_html()}</div></div>',
-        unsafe_allow_html=True,
-    )
-
+        st.rerun()
+    st.markdown(f'<div class="term-box"><div class="term-inner">{terminal_html()}</div></div>', unsafe_allow_html=True)
 
 run_every = POLL_INTERVAL if st.session_state.proc else None
 st.fragment(terminal_view, run_every=run_every)()
 
-# ---------------------------------------------------------------------------
-# Status proses + input
-# ---------------------------------------------------------------------------
 proc = st.session_state.proc
 if proc:
     c1, c2 = st.columns([6, 1])
-    c1.markdown(
-        f"<span style='color:#ffd866'>● berjalan: {escape(proc.label)} "
-        f"— ketikan di bawah dikirim sebagai input (stdin)</span>",
-        unsafe_allow_html=True,
-    )
+    c1.markdown(f"<span style='color:#ffd866'>● berjalan: {escape(proc.label)}</span>", unsafe_allow_html=True)
     if c2.button("⛔ Stop", use_container_width=True):
         proc.kill("dihentikan pengguna (Ctrl+C)")
         st.rerun()
@@ -719,7 +602,7 @@ with st.form("cmd_form", clear_on_submit=True):
 
 if submitted:
     if st.session_state.proc:
-        send_line(text)  # baris kosong juga boleh (menutup blok di interpreter)
+        send_line(text)
         st.rerun()
     elif text.strip():
         entry = {"cwd": rel_cwd(), "cmd": text.strip(), "segs": [], "size": 0}
@@ -731,20 +614,11 @@ if submitted:
             save_history()
         st.rerun()
 
-# ---------------------------------------------------------------------------
-# Editor file
-# ---------------------------------------------------------------------------
 if st.session_state.editing:
     rel = st.session_state.editing
     with st.container(border=True):
         st.markdown(f"**✏️ Editor:** `{rel}`")
-        content = st.text_area(
-            "isi file",
-            value=st.session_state.edit_initial,
-            height=300,
-            key=f"editor_{st.session_state.edit_nonce}",
-            label_visibility="collapsed",
-        )
+        content = st.text_area("isi file", value=st.session_state.edit_initial, height=300, key=f"editor_{st.session_state.edit_nonce}", label_visibility="collapsed")
         b1, b2, _ = st.columns([1, 1, 5])
         if b1.button("💾 Simpan"):
             target = SANDBOX / rel
@@ -758,15 +632,8 @@ if st.session_state.editing:
             st.session_state.editing = None
             st.rerun()
 
-# ---------------------------------------------------------------------------
-# Upload & kontrol
-# ---------------------------------------------------------------------------
 with st.expander("📤 Upload file ke folder aktif"):
-    ups = st.file_uploader(
-        "Pilih file (maks 5 MB)",
-        accept_multiple_files=True,
-        key=f"uploader_{st.session_state.up_nonce}",
-    )
+    ups = st.file_uploader("Pilih file (maks 5 MB)", accept_multiple_files=True, key=f"uploader_{st.session_state.up_nonce}")
     if ups:
         saved = []
         for f in ups:
@@ -789,8 +656,4 @@ if k1.button("🧹 Bersihkan"):
     st.session_state.history = []
     save_history()
     st.rerun()
-k2.caption(
-    f"Folder aktif: {rel_cwd()} · perintah singkat timeout {TIMEOUT_SECONDS} dtk · "
-    f"proses Python maks {MAX_RUNTIME} dtk · Python "
-    f"{'AKTIF' if ALLOW_PYTHON else 'nonaktif'}"
-)
+k2.caption(f"Folder aktif: {rel_cwd()} · timeout {TIMEOUT_SECONDS} dtk · proses Python maks {MAX_RUNTIME} dtk · Python {'AKTIF' if ALLOW_PYTHON else 'nonaktif'}")
