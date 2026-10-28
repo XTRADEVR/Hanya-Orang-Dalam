@@ -1,13 +1,13 @@
-import os, shlex, subprocess, json, sys, threading, queue, signal
+import os, shlex, subprocess, json
 from pathlib import Path
 from html import escape
 import streamlit as st
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Web Terminal PRO V3", page_icon="💻", layout="wide")
+st.set_page_config(page_title="Web Terminal PRO V4", page_icon="💻", layout="wide")
 BASE_DIR = Path(__file__).resolve().parent
 SANDBOX = BASE_DIR / "sandbox"
 SANDBOX.mkdir(exist_ok=True)
-HISTORY_FILE = BASE_DIR / "history.json"
 SAFE_ENV = {"PATH": os.environ.get("PATH","/usr/bin:/bin"), "HOME": str(SANDBOX)}
 HELP_TEXT = "help | clear | pwd | cd | ls | cat | mkdir | touch | rm | edit | echo | python"
 
@@ -21,12 +21,12 @@ def rel_cwd():
         return "~" if str(r)=="." else f"~/{r}"
     except: return "~"
 
-for k,v in {"history":[],"cwd":".","editing":None,"edit_initial":"","up_nonce":0}.items():
+for k,v in {"history":[],"cwd":".","editing":None,"edit_initial":"","up_nonce":0,"preview":None}.items():
     if k not in st.session_state: st.session_state[k]=v
 
 css="<style>.stApp{background:#000}.term-box{background:#000;border:1px solid #1f6f1f;border-radius:8px;height:45vh;overflow-y:auto;display:flex;flex-direction:column-reverse;padding:12px}.term-inner{font-family:monospace;color:#39ff14;white-space:pre-wrap}</style>"
 st.markdown(css,unsafe_allow_html=True)
-st.markdown("### Web Terminal PRO V3 - FIXED EDIT")
+st.markdown("### Web Terminal PRO V4 - PERTAHANAN + PREVIEW")
 
 def terminal_html():
     parts=['<span>Terminal siap. Ketik help</span>\n']
@@ -85,6 +85,7 @@ if sub and txt.strip():
                 except: content=""
             st.session_state.editing=str(fpath)
             st.session_state.edit_initial=content
+            st.session_state.preview=None
             add_out(entry,f"membuka editor {fname}\n")
             st.session_state.history.append(entry)
     elif tokens[0] in ("cat","mkdir","touch","rm","echo"):
@@ -101,7 +102,7 @@ if sub and txt.strip():
         st.session_state.history.append(entry)
     st.rerun()
 
-# EDITOR
+# EDITOR - DIPERTAHANKAN
 if st.session_state.editing:
     st.markdown(f"#### ✏️ Editing {Path(st.session_state.editing).name}")
     new_content=st.text_area("editor",value=st.session_state.edit_initial,height=400,key="editor_area")
@@ -117,7 +118,19 @@ if st.session_state.editing:
         st.session_state.editing=None
         st.rerun()
 
-# FILE MANAGER
+# PREVIEW - TAMBAHAN BARU, LAMA TETAP ADA
+if st.session_state.preview:
+    st.markdown(f"#### 👁️ Preview {Path(st.session_state.preview).name}")
+    try:
+        html_data=Path(st.session_state.preview).read_text()
+        components.html(html_data,height=600,scrolling=True)
+    except Exception as e:
+        st.error(f"Gagal preview: {e}")
+    if st.button("❌ Tutup Preview"):
+        st.session_state.preview=None
+        st.rerun()
+
+# FILE MANAGER - DIPERTAHANKAN + TAMBAH PREVIEW
 st.markdown("---")
 st.markdown(f"#### 📁 File Manager - {rel_cwd()}")
 ups=st.file_uploader("Upload (max 10MB)",accept_multiple_files=True,key=f"up_{st.session_state.up_nonce}")
@@ -128,12 +141,17 @@ if ups:
     st.rerun()
 
 for p in sorted(current_dir().iterdir()):
-    c1,c2,c3=st.columns([4,1,1])
+    c1,c2,c3,c4=st.columns([3,1,1,1])
     c1.markdown(f"{'📁' if p.is_dir() else '📄'} {p.name}")
     if not p.is_dir():
         try: c2.download_button("⬇️",data=p.read_bytes(),file_name=p.name,key=f"dl_{p.name}")
         except: pass
-        if c3.button("🗑️",key=f"del_{p.name}"):
+        if p.suffix.lower() in [".html",".htm"]:
+            if c3.button("👁️",key=f"prev_{p.name}"):
+                st.session_state.preview=str(p)
+                st.session_state.editing=None
+                st.rerun()
+        if c4.button("🗑️",key=f"del_{p.name}"):
             p.unlink()
             st.rerun()
     else:
@@ -141,4 +159,4 @@ for p in sorted(current_dir().iterdir()):
             st.session_state.cwd=str(p.relative_to(SANDBOX))
             st.rerun()
 
-if st.button("🧹 Clear"): st.session_state.history=[]; st.rerun()
+if st.button("🧹 Clear Terminal"): st.session_state.history=[]; st.rerun()
